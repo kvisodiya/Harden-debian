@@ -1,76 +1,61 @@
 #!/usr/bin/env bash
 #===============================================================================
-# Fix script for hardening issues
+# Fix script - Remove Tor and fix other issues
 #===============================================================================
 
 set +e
 
-echo "Fixing hardening script issues..."
+echo "Fixing system issues and removing Tor..."
+echo ""
 
 #===============================================================================
-# FIX 1: Tor Repository Issue
+# REMOVE TOR COMPLETELY
 #===============================================================================
-echo "[1/3] Fixing Tor repository..."
+echo "[1/4] Removing Tor and its components..."
 
-# Remove broken Tor repository
+# Stop Tor service if running
+systemctl stop tor 2>/dev/null || service tor stop 2>/dev/null || true
+systemctl disable tor 2>/dev/null || true
+
+# Remove Tor packages
+apt-get remove --purge -y tor tor-geoipdb torsocks deb.torproject.org-keyring 2>/dev/null || true
+apt-get autoremove -y 2>/dev/null || true
+
+# Remove Tor repository
 rm -f /etc/apt/sources.list.d/tor.list
+rm -f /etc/apt/sources.list.d/tor.list.save
+rm -f /usr/share/keyrings/tor-archive-keyring.gpg
 
-# Add correct Tor repository
-cat > /etc/apt/sources.list.d/tor.list << 'EOF'
-deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org bullseye main
-deb-src [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org bullseye main
-EOF
+# Remove Tor configuration and data
+rm -rf /etc/tor
+rm -rf /var/lib/tor
+rm -rf /var/log/tor
+rm -rf /run/tor
 
-# Import Tor GPG key properly
-if [[ ! -f /usr/share/keyrings/tor-archive-keyring.gpg ]]; then
-    echo "Importing Tor GPG key..."
-    curl -fsSL https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc | \
-        gpg --dearmor -o /usr/share/keyrings/tor-archive-keyring.gpg 2>/dev/null
-fi
+# Remove Tor user if exists
+deluser --remove-home debian-tor 2>/dev/null || true
+delgroup debian-tor 2>/dev/null || true
 
-# Update apt
-apt-get update 2>&1 | grep -v "does not have a Release file"
-
-echo "✓ Tor repository fixed"
+echo "✓ Tor completely removed"
 
 #===============================================================================
-# FIX 2: Fail2ban sshd-ddos Filter Issue
+# FIX FAIL2BAN
 #===============================================================================
-echo "[2/3] Fixing Fail2ban configuration..."
+echo "[2/4] Fixing Fail2ban configuration..."
 
-# Create the missing sshd-ddos filter
-cat > /etc/fail2ban/filter.d/sshd-ddos.conf << 'EOF'
-# Fail2Ban filter for SSH DDOS attacks
-[Definition]
-failregex = ^.*sshd\[\d+\]: Did not receive identification string from <HOST>
-            ^.*sshd\[\d+\]: Connection closed by <HOST> port \d+ \[preauth\]
-            ^.*sshd\[\d+\]: Connection reset by <HOST> port \d+ \[preauth\]
-ignoreregex =
-EOF
+# Stop fail2ban first
+systemctl stop fail2ban 2>/dev/null || true
 
-# Fix jail.local to remove sshd-ddos or use correct configuration
+# Create proper jail.local without sshd-ddos
 cat > /etc/fail2ban/jail.local << 'EOF'
 [DEFAULT]
 # Ban duration (10 minutes default)
 bantime = 600
-
-# Time window for failures
 findtime = 600
-
-# Max failures before ban
 maxretry = 5
-
-# Ignore localhost
 ignoreip = 127.0.0.1/8 ::1
-
-# Backend for log monitoring
 backend = systemd
-
-# Ban action using UFW
 banaction = ufw
-banaction_allports = ufw
-
-# Email alerts (disabled by default)
 destemail = root@localhost
 sender = fail2ban@localhost
 action = %(action_)s
@@ -101,54 +86,100 @@ maxretry = 3
 EOF
 
 # Restart fail2ban
-systemctl restart fail2ban 2>/dev/null || service fail2ban restart
+systemctl restart fail2ban 2>/dev/null || service fail2ban restart 2>/dev/null
 
 echo "✓ Fail2ban configuration fixed"
 
 #===============================================================================
-# FIX 3: Fix UFW Logging Issue
+# UPDATE APT WITHOUT ERRORS
 #===============================================================================
-echo "[3/3] Fixing UFW logging..."
+echo "[3/4] Updating package lists..."
 
-# Set UFW logging to low to reduce noise
+# Clean apt cache first
+apt-get clean 2>/dev/null || true
+
+# Update without showing Tor repository errors
+apt-get update 2>&1 | grep -v "does not have a Release file" | grep -v "torproject"
+
+echo "✓ Package lists updated"
+
+#===============================================================================
+# OPTIMIZE UFW LOGGING
+#===============================================================================
+echo "[4/4] Optimizing UFW..."
+
+# Set UFW logging to low to reduce log spam
 ufw logging low 2>/dev/null || true
 
-echo "✓ UFW logging adjusted"
+# Ensure UFW is enabled
+ufw --force enable 2>/dev/null || true
+
+echo "✓ UFW optimized"
 
 #===============================================================================
-# VERIFY FIXES
+# CLEAN UP SYSTEM
 #===============================================================================
 echo ""
-echo "Verifying fixes..."
-echo ""
+echo "Performing system cleanup..."
 
-# Check Tor repository
-if apt-cache policy tor >/dev/null 2>&1; then
-    echo "✓ Tor repository: OK"
+# Remove orphaned packages
+apt-get autoremove -y 2>/dev/null || true
+
+# Clean package cache
+apt-get autoclean -y 2>/dev/null || true
+apt-get clean 2>/dev/null || true
+
+# Clear systemd journal if too large
+journalctl --vacuum-time=7d 2>/dev/null || true
+
+echo "✓ System cleanup completed"
+
+#===============================================================================
+# VERIFICATION
+#===============================================================================
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Verification Results:"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Check if Tor is removed
+if ! command -v tor >/dev/null 2>&1; then
+    echo "✓ Tor: Successfully removed"
 else
-    echo "✗ Tor repository: Still has issues"
+    echo "✗ Tor: Still present"
 fi
 
 # Check Fail2ban
-if fail2ban-client status >/dev/null 2>&1; then
-    echo "✓ Fail2ban: Running"
-    fail2ban-client status sshd >/dev/null 2>&1 && echo "  ✓ SSH jail: Active"
+if systemctl is-active fail2ban >/dev/null 2>&1; then
+    echo "✓ Fail2ban: Active"
+    fail2ban-client status >/dev/null 2>&1 && {
+        jails=$(fail2ban-client status | grep "Jail list" | sed 's/.*Jail list:\s*//' | tr ',' '\n' | wc -l)
+        echo "  └─ Active jails: $jails"
+    }
 else
-    echo "✗ Fail2ban: Not running properly"
+    echo "✗ Fail2ban: Not running"
 fi
 
 # Check UFW
-if ufw status | grep -q "active"; then
-    echo "✓ UFW: Active"
+if ufw status | grep -q "Status: active"; then
+    rules=$(ufw status numbered | grep "^\[" | wc -l)
+    echo "✓ UFW: Active with $rules rules"
 else
     echo "✗ UFW: Not active"
 fi
 
-echo ""
-echo "Fixes applied. Now you can run: lynis audit system"
-echo ""
+# Check for apt errors
+if apt-get update 2>&1 | grep -q "^E:"; then
+    echo "✗ APT: Still has errors"
+else
+    echo "✓ APT: No errors"
+fi
 
-# Clean up apt cache
-apt-get clean 2>/dev/null || true
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "✓ All fixes applied!"
+echo ""
+echo "You can now run: sudo lynis audit system"
+echo ""
 
 exit 0
