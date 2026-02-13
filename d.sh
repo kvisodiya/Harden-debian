@@ -1990,3 +1990,344 @@ verify_configuration() {
     if dig +short google.com A >/dev/null 2>&1 || \
        getent hosts google.com >/dev/null 2>&1; then
         print_status "SUCCESS" "DNS resolution: OK"
+        ((tests_passed++))
+    else
+        print_status "WARNING" "DNS resolution: FAILED"
+        ((tests_failed++))
+    fi
+    
+    # Test network connectivity
+    print_status "INFO" "Testing network connectivity..."
+    if ping -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; then
+        print_status "SUCCESS" "Network connectivity: OK"
+        ((tests_passed++))
+    else
+        print_status "WARNING" "Network connectivity: Limited"
+        ((tests_failed++))
+    fi
+    
+    # Test SSH service
+    print_status "INFO" "Testing SSH service..."
+    local ssh_service
+    ssh_service=$(get_ssh_service_name)
+    if systemctl is-active "$ssh_service" >/dev/null 2>&1; then
+        print_status "SUCCESS" "SSH service: Active"
+        ((tests_passed++))
+    else
+        print_status "WARNING" "SSH service: Not active"
+        ((tests_failed++))
+    fi
+    
+    # Test UFW firewall
+    print_status "INFO" "Testing UFW firewall..."
+    if ufw status 2>/dev/null | grep -q "active"; then
+        print_status "SUCCESS" "UFW firewall: Active"
+        ((tests_passed++))
+    else
+        print_status "WARNING" "UFW firewall: Not active"
+        ((tests_failed++))
+    fi
+    
+    # Test Tor if installed
+    if systemctl is-active tor >/dev/null 2>&1; then
+        print_status "SUCCESS" "Tor service: Active"
+        ((tests_passed++))
+    fi
+    
+    # Test Unbound if installed
+    if systemctl is-active unbound >/dev/null 2>&1; then
+        print_status "SUCCESS" "Unbound DNS: Active"
+        ((tests_passed++))
+    fi
+    
+    # Test Fail2ban if installed
+    if systemctl is-active fail2ban >/dev/null 2>&1; then
+        print_status "SUCCESS" "Fail2ban: Active"
+        ((tests_passed++))
+    fi
+    
+    # Test AppArmor if available
+    if check_command apparmor_status; then
+        if apparmor_status --enabled 2>/dev/null; then
+            print_status "SUCCESS" "AppArmor: Enabled"
+            ((tests_passed++))
+        fi
+    fi
+    
+    # Test auditd if installed
+    if systemctl is-active auditd >/dev/null 2>&1; then
+        print_status "SUCCESS" "Auditd: Active"
+        ((tests_passed++))
+    fi
+    
+    print_status "INFO" "Verification complete: $tests_passed passed, $tests_failed warnings"
+}
+
+#===============================================================================
+# LYNIS AUDIT
+#===============================================================================
+run_lynis_audit() {
+    print_section "Running Lynis Security Audit"
+    
+    if ! check_command lynis; then
+        print_status "SKIP" "Lynis not installed - skipping audit"
+        return 1
+    fi
+    
+    print_status "INFO" "Starting Lynis security audit (this may take a few minutes)..."
+    
+    # Run Lynis audit
+    lynis audit system --quick --quiet --no-colors > /tmp/lynis_audit.txt 2>&1 || true
+    
+    # Extract hardening index
+    local hardening_index=""
+    hardening_index=$(grep "Hardening index" /tmp/lynis_audit.txt 2>/dev/null | grep -oE "[0-9]+" | head -1)
+    
+    if [[ -n "$hardening_index" ]]; then
+        print_status "SUCCESS" "Lynis Hardening Score: $hardening_index/100"
+        
+        if [[ $hardening_index -ge 92 ]]; then
+            print_status "SUCCESS" "Target score of 92+ achieved!"
+        elif [[ $hardening_index -ge 85 ]]; then
+            print_status "SUCCESS" "Good hardening score achieved"
+        else
+            print_status "INFO" "Score is $hardening_index - review Lynis suggestions for improvements"
+        fi
+    else
+        print_status "WARNING" "Could not determine Lynis score"
+    fi
+    
+    # Save detailed report
+    if [[ -f /tmp/lynis_audit.txt ]]; then
+        cp /tmp/lynis_audit.txt "$REPORT_FILE.lynis" 2>/dev/null
+        print_status "INFO" "Detailed Lynis report saved to: $REPORT_FILE.lynis"
+    fi
+    
+    rm -f /tmp/lynis_audit.txt
+}
+
+#===============================================================================
+# GENERATE FINAL REPORT
+#===============================================================================
+generate_report() {
+    print_section "Generating Security Report"
+    
+    cat > "$REPORT_FILE" << REPORT_EOF
+================================================================================
+                    DEBIAN 11 VPS SECURITY HARDENING REPORT
+================================================================================
+
+Date: $(date)
+Hostname: $(hostname)
+IP Address: $(hostname -I | awk '{print $1}')
+Kernel: $(uname -r)
+Script Version: $SCRIPT_VERSION
+
+================================================================================
+                              EXECUTION SUMMARY
+================================================================================
+
+Tasks Completed:     $TASKS_COMPLETED
+Tasks Skipped:       $TASKS_SKIPPED
+Tasks Failed:        $TASKS_FAILED
+Warnings:            $WARNINGS_COUNT
+
+Execution Time:      $(($(date +%s) - SCRIPT_START_TIME)) seconds
+Backup Location:     $BACKUP_DIR
+Log File:            $LOG_FILE
+
+================================================================================
+                           SECURITY COMPONENTS STATUS
+================================================================================
+
+REPORT_EOF
+
+    # Check service status
+    echo "Service Status:" >> "$REPORT_FILE"
+    echo "---------------" >> "$REPORT_FILE"
+    
+    local services=(
+        "ssh|SSH Server"
+        "ufw|UFW Firewall"
+        "fail2ban|Fail2ban IPS"
+        "unbound|Unbound DNS"
+        "tor|Tor Proxy"
+        "apparmor|AppArmor MAC"
+        "auditd|Audit Daemon"
+        "unattended-upgrades|Auto Updates"
+    )
+    
+    for service_info in "${services[@]}"; do
+        local service="${service_info%%|*}"
+        local description="${service_info##*|}"
+        
+        if [[ "$service" == "ssh" ]]; then
+            service=$(get_ssh_service_name)
+        fi
+        
+        if systemctl is-active "$service" >/dev/null 2>&1; then
+            echo "✓ $description: ACTIVE" >> "$REPORT_FILE"
+        elif check_service_exists "$service"; then
+            echo "✗ $description: INACTIVE" >> "$REPORT_FILE"
+        else
+            echo "- $description: NOT INSTALLED" >> "$REPORT_FILE"
+        fi
+    done
+    
+    echo "" >> "$REPORT_FILE"
+    echo "Security Features:" >> "$REPORT_FILE"
+    echo "------------------" >> "$REPORT_FILE"
+    
+    # Check security features
+    [[ -f /etc/sysctl.d/99-security-hardening.conf ]] && \
+        echo "✓ Kernel hardening applied" >> "$REPORT_FILE"
+    
+    [[ -f /etc/security/limits.d/99-disable-coredump.conf ]] && \
+        echo "✓ Core dumps disabled" >> "$REPORT_FILE"
+    
+    [[ -f /etc/ssh/sshd_config.d/99-hardening.conf ]] && \
+        echo "✓ SSH hardening applied" >> "$REPORT_FILE"
+    
+    [[ -f /var/lib/aide/aide.db ]] && \
+        echo "✓ AIDE database initialized" >> "$REPORT_FILE"
+    
+    [[ -f /etc/cron.daily/aide-check ]] && \
+        echo "✓ Daily AIDE checks scheduled" >> "$REPORT_FILE"
+    
+    [[ -f /etc/cron.weekly/rootkit-scan ]] && \
+        echo "✓ Weekly rootkit scans scheduled" >> "$REPORT_FILE"
+    
+    [[ -f /etc/cron.weekly/lynis-audit ]] && \
+        echo "✓ Weekly Lynis audits scheduled" >> "$REPORT_FILE"
+    
+    # Add Lynis score if available
+    if check_command lynis; then
+        echo "" >> "$REPORT_FILE"
+        echo "Lynis Security Score:" >> "$REPORT_FILE"
+        echo "---------------------" >> "$REPORT_FILE"
+        local score
+        score=$(lynis show hardening-index 2>/dev/null | grep -oE "[0-9]+")
+        if [[ -n "$score" ]]; then
+            echo "Hardening Index: $score/100" >> "$REPORT_FILE"
+        fi
+    fi
+    
+    echo "" >> "$REPORT_FILE"
+    echo "=================================================================================" >> "$REPORT_FILE"
+    echo "                              RECOMMENDATIONS" >> "$REPORT_FILE"
+    echo "=================================================================================" >> "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    echo "1. Review the detailed log file at: $LOG_FILE" >> "$REPORT_FILE"
+    echo "2. Configure SSH key authentication and disable password authentication" >> "$REPORT_FILE"
+    echo "3. Review and customize UFW firewall rules for your specific needs" >> "$REPORT_FILE"
+    echo "4. Set up email alerts for security events" >> "$REPORT_FILE"
+    echo "5. Regularly review audit logs in /var/log/audit/" >> "$REPORT_FILE"
+    echo "6. Keep the system updated with: apt update && apt upgrade" >> "$REPORT_FILE"
+    echo "7. Run 'lynis audit system' for detailed security recommendations" >> "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    echo "=================================================================================" >> "$REPORT_FILE"
+    echo "                            END OF REPORT" >> "$REPORT_FILE"
+    echo "=================================================================================" >> "$REPORT_FILE"
+    
+    print_status "SUCCESS" "Security report saved to: $REPORT_FILE"
+}
+
+#===============================================================================
+# CLEANUP
+#===============================================================================
+cleanup() {
+    print_section "Performing Cleanup"
+    
+    # Clean apt cache
+    apt-get clean >> "$LOG_FILE" 2>&1 || true
+    apt-get autoclean >> "$LOG_FILE" 2>&1 || true
+    
+    # Remove temporary files
+    rm -rf /tmp/hardening_* 2>/dev/null || true
+    
+    # Restore file descriptors
+    exec 1>&3 2>&4
+    
+    print_status "SUCCESS" "Cleanup completed"
+}
+
+#===============================================================================
+# MAIN EXECUTION
+#===============================================================================
+main() {
+    # Initialize
+    init_logging
+    print_banner
+    
+    # Pre-flight checks
+    check_root
+    check_debian_version
+    check_network_connectivity
+    create_backups
+    
+    # Core hardening
+    perform_system_updates
+    install_security_packages
+    configure_unattended_upgrades
+    configure_sysctl_hardening
+    secure_shared_memory
+    disable_core_dumps
+    
+    # Service configuration
+    configure_ssh_hardening
+    configure_unbound_dns
+    install_configure_tor
+    configure_fail2ban
+    
+    # Security monitoring
+    configure_aide
+    configure_rootkit_scanners
+    configure_auditd
+    configure_apparmor
+    configure_lynis
+    
+    # Additional hardening
+    apply_additional_hardening
+    
+    # Firewall (enable last to avoid disruption)
+    configure_ufw_firewall
+    
+    # Verification
+    verify_configuration
+    run_lynis_audit
+    
+    # Reporting
+    generate_report
+    cleanup
+    
+    # Final summary
+    print_section "Hardening Complete!"
+    
+    echo ""
+    echo -e "${GREEN}${BOLD}✓ System hardening completed successfully!${NC}"
+    echo ""
+    echo -e "${BOLD}Summary:${NC}"
+    echo -e "  • Tasks Completed: ${GREEN}$TASKS_COMPLETED${NC}"
+    echo -e "  • Tasks Skipped: ${YELLOW}$TASKS_SKIPPED${NC}"
+    echo -e "  • Tasks Failed: ${RED}$TASKS_FAILED${NC}"
+    echo -e "  • Warnings: ${YELLOW}$WARNINGS_COUNT${NC}"
+    echo ""
+    echo -e "${BOLD}Important Files:${NC}"
+    echo -e "  • Backup Directory: $BACKUP_DIR"
+    echo -e "  • Log File: $LOG_FILE"
+    echo -e "  • Security Report: $REPORT_FILE"
+    echo ""
+    echo -e "${YELLOW}${BOLD}⚠ IMPORTANT:${NC}"
+    echo -e "  1. Test SSH access in a new session before closing this one"
+    echo -e "  2. Review the security report for any issues"
+    echo -e "  3. Consider rebooting to ensure all changes take effect"
+    echo ""
+    
+    return 0
+}
+
+# Execute main function
+main "$@"
+
+# Exit successfully
+exit 0
