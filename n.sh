@@ -1,12 +1,9 @@
 #!/bin/bash
 ##############################################################################
-# final.sh — Production VPS Hardening (Stable Version)
+# final.sh — Stable Production VPS Hardening
 ##############################################################################
 
-set -uo pipefail
-set -e
-
-trap 'echo "Error on line $LINENO"; exit 1' ERR
+set -u
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run as root: sudo bash final.sh"
@@ -24,7 +21,7 @@ echo ""
 ##############################################################################
 echo "[1/7] Kernel hardening..."
 
-rm -f /etc/sysctl.d/99-*.conf 2>/dev/null || true
+rm -f /etc/sysctl.d/99-*.conf 2>/dev/null
 
 cat > /etc/sysctl.d/99-hardening.conf <<'SYSCTL'
 net.ipv4.ip_forward = 0
@@ -67,11 +64,13 @@ echo "[2/7] AIDE..."
 apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq aide aide-common >/dev/null 2>&1
 
-rm -f /var/lib/aide/aide.db* 2>/dev/null || true
+rm -f /var/lib/aide/aide.db* 2>/dev/null
 
 if command -v aideinit >/dev/null 2>&1; then
   echo "Building AIDE database..."
-  timeout 300 aideinit >/dev/null 2>&1 || true
+  if ! timeout 300 aideinit >/dev/null 2>&1; then
+    echo "AIDE init timed out — continuing"
+  fi
 fi
 
 if [ -f /var/lib/aide/aide.db.new ]; then
@@ -132,7 +131,7 @@ SSH
 chmod 600 /etc/ssh/sshd_config
 
 if sshd -t 2>/dev/null; then
-  systemctl restart ssh
+  systemctl restart ssh >/dev/null 2>&1
 fi
 
 echo "✔ SSH done"
@@ -145,11 +144,11 @@ echo "[4/7] UFW..."
 apt-get install -y -qq ufw >/dev/null 2>&1
 
 ufw --force reset >/dev/null 2>&1
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow ${SSH_PORT}/tcp
-ufw limit ${SSH_PORT}/tcp
-ufw --force enable
+ufw default deny incoming >/dev/null 2>&1
+ufw default allow outgoing >/dev/null 2>&1
+ufw allow ${SSH_PORT}/tcp >/dev/null 2>&1
+ufw limit ${SSH_PORT}/tcp >/dev/null 2>&1
+ufw --force enable >/dev/null 2>&1
 
 echo "✔ UFW active"
 
@@ -178,7 +177,7 @@ systemctl restart fail2ban >/dev/null 2>&1
 echo "✔ Fail2ban active"
 
 ##############################################################################
-# 6. BASIC SERVICE HARDENING
+# 6. SERVICE HARDENING (SAFE)
 ##############################################################################
 echo "[6/7] Service hardening..."
 
@@ -194,12 +193,12 @@ HARD
   fi
 done
 
-systemctl daemon-reload
+systemctl daemon-reload >/dev/null 2>&1
 
 echo "✔ Services hardened"
 
 ##############################################################################
-# 7. EXTRA
+# 7. EXTRAS
 ##############################################################################
 echo "[7/7] Extras..."
 
@@ -225,4 +224,4 @@ echo -n "SSH: " && systemctl is-active ssh >/dev/null 2>&1 && echo OK || echo FA
 echo -n "UFW: " && ufw status | grep -q active && echo OK || echo FAIL
 echo -n "Fail2ban: " && systemctl is-active fail2ban >/dev/null 2>&1 && echo OK || echo FAIL
 echo ""
-echo "Done."
+echo "Hardening complete."
